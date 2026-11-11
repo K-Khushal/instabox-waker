@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      test:
+        description: "Wake the box now and print T3 status (ignores WAKE_AT)"
+        type: boolean
+        default: false
 
 permissions:
   actions: write
@@ -32,6 +37,10 @@ jobs:
         id: d
         run: |
           act=none
+          if [ "${{ inputs.test }}" = true ]; then
+            echo "Test run: waking box and printing status."
+            echo "act=test" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if [ -z "$WAKE_AT" ] || [ "$WAKE_AT" = none ]; then
             echo "Nothing waiting on a limit."
             act=disable
@@ -46,8 +55,12 @@ jobs:
           echo "act=$act" >> "$GITHUB_OUTPUT"
 
       - name: Wake box
-        if: steps.d.outputs.act == 'wake' || steps.d.outputs.act == 'check'
+        if: steps.d.outputs.act == 'wake' || steps.d.outputs.act == 'check' || steps.d.outputs.act == 'test'
         run: $IB wake "$BOX" || echo "::warning::wake failed (cooldown or error); will retry next run"
+
+      - name: Test - box status
+        if: steps.d.outputs.act == 'test'
+        run: $IB exec "$BOX" -- sh -c '.local/bin/t3-wake status | sed -E "s/^([^ ]+)  .*/\1  waiting thread/"; systemctl --user is-active t3code.service t3-wake-sync.timer'
 
       - name: Check T3 Code resumed
         if: steps.d.outputs.act == 'check'
