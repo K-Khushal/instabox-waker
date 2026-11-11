@@ -1,0 +1,6 @@
+[Unit]
+Description=Publish T3 Code limit reset time to GitHub (instabox waker)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/t3-wake sync

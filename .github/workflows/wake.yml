@@ -1,0 +1,58 @@
+name: wake box
+
+# Enabled by the box (t3-wake sync) when T3 Code threads are waiting on a
+# limit; disables itself once nothing is pending, so it only uses Actions
+# minutes while waiting.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: wake
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BOX: box-8889b2
+      WAKE_AT: ${{ vars.WAKE_AT }}
+      LEAD_MINUTES: "20"   # wake this long before the reset
+      INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
+      INSTABOX_NO_UPDATE_CHECK: "1"
+      IB: npx -y instabox@0.8.245
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Decide
+        id: d
+        run: |
+          act=none
+          if [ -z "$WAKE_AT" ] || [ "$WAKE_AT" = none ]; then
+            echo "Nothing waiting on a limit."
+            act=disable
+          else
+            now=$(date -u +%s); reset=$(date -u -d "$WAKE_AT" +%s)
+            if   [ "$now" -lt $((reset - LEAD_MINUTES*60)) ]; then echo "Reset at $WAKE_AT; too early to wake."
+            elif [ "$now" -lt $((reset + 5*60)) ];          then echo "Reset at $WAKE_AT; waking box."; act=wake
+            elif [ "$now" -lt $((reset + 6*3600)) ];        then echo "Reset at $WAKE_AT passed; waking and checking."; act=check
+            else echo "WAKE_AT $WAKE_AT is stale."; act=disable
+            fi
+          fi
+          echo "act=$act" >> "$GITHUB_OUTPUT"
+
+      - name: Wake box
+        if: steps.d.outputs.act == 'wake' || steps.d.outputs.act == 'check'
+        run: $IB wake "$BOX" || echo "::warning::wake failed (cooldown or error); will retry next run"
+
+      - name: Check T3 Code resumed
+        if: steps.d.outputs.act == 'check'
+        run: $IB exec "$BOX" -- .local/bin/t3-wake check || echo "::warning::check failed; will retry next run"
+
+      - name: Disable this schedule
+        if: steps.d.outputs.act == 'disable'
+        run: gh workflow disable wake.yml -R "$GITHUB_REPOSITORY"

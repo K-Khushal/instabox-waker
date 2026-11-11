@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Tell GitHub when T3 Code's rate-limited threads reset, so the box can be woken.
+
+Reads T3 Code's database read-only. A thread is "waiting" when T3 Code armed
+limit recovery on it (limitRecovery.autoResume, not snoozed) and no run has
+started on it since its resetAt.
+
+  t3-wake status   print waiting threads and the earliest reset
+  t3-wake sync     publish the earliest reset as the GitHub variable WAKE_AT
+                   and enable the wake workflow (or set WAKE_AT=none)
+  t3-wake check    run by the workflow after a reset: if threads are still
+                   waiting 5+ minutes past their reset and nothing is running,
+                   restart T3 Code so it picks them up; then sync
+"""
+import datetime as dt
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+
+REPO = os.environ.get("T3_WAKE_REPO", "K-Khushal/instabox-waker")
+WORKFLOW = "wake.yml"
+DB = os.path.expanduser("~/.t3/userdata/statev2.sqlite")
+STATE = os.path.expanduser("~/.local/state/t3-wake/last")
+GRACE = dt.timedelta(minutes=5)
+STALE = dt.timedelta(hours=6)  # ignore resets older than this
+
+
+def parse(ts):
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def waiting():
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=10)
+    out = []
+    rows = con.execute(
+        "select thread_id, title, payload_json from orchestration_v2_projection_threads "
+        "where archived_at is null and deleted_at is null and payload_json like '%limitRecovery%'"
+    )
+    for tid, title, payload in rows:
+        lr = (json.loads(payload or "{}") or {}).get("limitRecovery") or {}
+        if not lr.get("autoResume") or lr.get("snooze") or not lr.get("resetAt"):
+            continue
+        reset = parse(lr["resetAt"])
+        if reset < now() - STALE:
+            continue
+        resumed = False
+        for (req,) in con.execute(
+            "select requested_at from orchestration_v2_projection_runs where thread_id = ?", (tid,)
+        ):
+            if req and parse(req) >= reset:
+                resumed = True
+                break
+        if not resumed:
+            out.append((reset, tid, title or ""))
+    running = con.execute(
+        "select count(*) from orchestration_v2_projection_runs "
+        "where status not in ('completed', 'failed') and completed_at is null"
+    ).fetchone()[0]
+    con.close()
+    return sorted(out), running
+
+
+def gh(*args):
+    return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60)
+
+
+def sync():
+    items, _ = waiting()
+    value = items[0][0].strftime("%Y-%m-%dT%H:%M:%SZ") if items else "none"
+    try:
+        last = open(STATE).read().strip()
+    except OSError:
+        last = None
+    if value == last:
+        print(f"WAKE_AT unchanged: {value}")
+        return
+    r = gh("variable", "set", "WAKE_AT", "-R", REPO, "-b", value)
+    if r.returncode != 0:
+        sys.exit(f"gh variable set failed: {r.stderr.strip()}")
+    if value != "none":
+        r = gh("workflow", "enable", WORKFLOW, "-R", REPO)
+        if r.returncode != 0 and "already enabled" not in (r.stderr + r.stdout).lower():
+            print(f"warning: could not enable workflow: {r.stderr.strip()}")
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        f.write(value)
+    print(f"WAKE_AT set to {value} ({len(items)} thread(s) waiting)")
+
+
+def check():
+    items, running = waiting()
+    overdue = [i for i in items if i[0] + GRACE <= now()]
+    if overdue and running == 0:
+        print(f"{len(overdue)} thread(s) still waiting past reset; restarting T3 Code")
+        subprocess.run(["systemctl", "--user", "restart", "t3code.service"], check=False)
+    elif overdue:
+        print(f"{len(overdue)} thread(s) overdue but {running} run(s) active; not restarting")
+    else:
+        print("no overdue threads")
+    sync()
+
+
+def status():
+    items, running = waiting()
+    print(f"runs active: {running}")
+    for reset, tid, title in items:
+        print(f"{reset.isoformat()}  {title[:60]}  ({tid[:40]})")
+    if not items:
+        print("no threads waiting on a limit")
+
+
+if __name__ == "__main__":
+    {"sync": sync, "check": check, "status": status}.get(
+        sys.argv[1] if len(sys.argv) > 1 else "status", status
+    )()
