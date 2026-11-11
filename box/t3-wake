@@ -10,9 +10,9 @@ started on it since its resetAt.
                    and enable the wake workflow (or set WAKE_AT=none)
   t3-wake ensure   after a wake: T3 Code server answering, T3 Connect tunnel
                    connected (restart T3 Code if not), instabox's T3 server up
-  t3-wake check    run by the workflow after a reset: if threads are still
-                   waiting 5+ minutes past their reset and nothing is running,
-                   restart T3 Code so it picks them up; then sync
+  t3-wake check    run by the workflow after a reset: ensure, then send
+                   "continue" (t3 thread send) to any thread T3 Code has not
+                   resumed 5+ minutes after its reset; then sync
 """
 import datetime as dt
 import json
@@ -32,6 +32,10 @@ RUNTIME = os.path.expanduser("~/.t3/userdata/server-runtime.json")
 INSTABOX_T3_START = os.path.expanduser("~/.local/share/t3-instabox/start")
 STATE = os.path.expanduser("~/.local/state/t3-wake/last")
 GRACE = dt.timedelta(minutes=5)
+NUDGE = os.environ.get(
+    "T3_WAKE_NUDGE",
+    "The usage limit has reset. Continue where you left off.",
+)
 STALE = dt.timedelta(hours=6)  # ignore resets older than this
 
 
@@ -195,16 +199,34 @@ def ensure():
     return healthy
 
 
+def t3_bin():
+    """The t3 binary the T3 Code service runs (matches the server version)."""
+    unit = os.path.expanduser("~/.config/systemd/user/t3code.service")
+    try:
+        for line in open(unit):
+            if line.startswith("ExecStart="):
+                return line.split("=", 1)[1].split()[0]
+    except OSError:
+        pass
+    return "t3"
+
+
 def check():
-    items, running = waiting()
+    """After a reset: nudge any thread T3 Code has not resumed by itself."""
+    if not ensure():
+        print("T3 Code not healthy; skipping nudge this time")
+        sync()
+        return
+    items, _ = waiting()
     overdue = [i for i in items if i[0] + GRACE <= now()]
-    if overdue and running == 0:
-        print(f"{len(overdue)} thread(s) still waiting past reset; restarting T3 Code")
-        restart_t3()
-        ensure()
-    elif overdue:
-        print(f"{len(overdue)} thread(s) overdue but {running} run(s) active; not restarting")
-    else:
+    for reset, tid, title in overdue:
+        print(f"thread not resumed {GRACE} after reset; sending continue: {tid[:40]}")
+        r = subprocess.run(
+            [t3_bin(), "thread", "send", "--base-dir", os.path.expanduser("~/.t3"), tid, NUDGE],
+            capture_output=True, text=True, timeout=120,
+        )
+        print("  sent" if r.returncode == 0 else f"  failed: {(r.stderr or r.stdout).strip()[:200]}")
+    if not overdue:
         print("no overdue threads")
     sync()
 
