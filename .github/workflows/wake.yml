@@ -1,8 +1,8 @@
 name: wake box
 
 # Enabled by the box (t3-wake sync) when T3 Code threads are waiting on a
-# limit; disables itself once nothing is pending, so it only uses Actions
-# minutes while waiting.
+# limit (WAKE_AT = reset time) or agents are working (WAKE_AT = busy);
+# disables itself once WAKE_AT = none.
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -44,6 +44,9 @@ jobs:
           if [ -z "$WAKE_AT" ] || [ "$WAKE_AT" = none ]; then
             echo "Nothing waiting on a limit."
             act=disable
+          elif [ "$WAKE_AT" = busy ]; then
+            echo "Agents are working; keeping the box awake after any pause."
+            act=wake
           else
             now=$(date -u +%s); reset=$(date -u -d "$WAKE_AT" +%s)
             if   [ "$now" -lt $((reset - LEAD_MINUTES*60)) ]; then echo "Reset at $WAKE_AT; too early to wake."
@@ -57,6 +60,10 @@ jobs:
       - name: Wake box
         if: steps.d.outputs.act == 'wake' || steps.d.outputs.act == 'check' || steps.d.outputs.act == 'test'
         run: $IB wake "$BOX" || echo "::warning::wake failed (cooldown or error); will retry next run"
+
+      - name: Make sure T3 Code and T3 Connect work
+        if: steps.d.outputs.act == 'wake' || steps.d.outputs.act == 'check' || steps.d.outputs.act == 'test'
+        run: $IB exec "$BOX" -- .local/bin/t3-wake ensure || echo "::warning::T3 not healthy yet; will retry next run"
 
       - name: Test - box status
         if: steps.d.outputs.act == 'test'

@@ -8,6 +8,8 @@ started on it since its resetAt.
   t3-wake status   print waiting threads and the earliest reset
   t3-wake sync     publish the earliest reset as the GitHub variable WAKE_AT
                    and enable the wake workflow (or set WAKE_AT=none)
+  t3-wake ensure   after a wake: T3 Code server answering, T3 Connect tunnel
+                   connected (restart T3 Code if not), instabox's T3 server up
   t3-wake check    run by the workflow after a reset: if threads are still
                    waiting 5+ minutes past their reset and nothing is running,
                    restart T3 Code so it picks them up; then sync
@@ -15,13 +17,19 @@ started on it since its resetAt.
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 
 REPO = os.environ.get("T3_WAKE_REPO", "K-Khushal/instabox-waker")
 WORKFLOW = "wake.yml"
 DB = os.path.expanduser("~/.t3/userdata/statev2.sqlite")
+RUNTIME = os.path.expanduser("~/.t3/userdata/server-runtime.json")
+INSTABOX_T3_START = os.path.expanduser("~/.local/share/t3-instabox/start")
 STATE = os.path.expanduser("~/.local/state/t3-wake/last")
 GRACE = dt.timedelta(minutes=5)
 STALE = dt.timedelta(hours=6)  # ignore resets older than this
@@ -58,9 +66,13 @@ def waiting():
                 break
         if not resumed:
             out.append((reset, tid, title or ""))
+    # runs still in progress (ignore anything older than 12 h, e.g. a lost run)
+    cutoff = (now() - dt.timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%S")
     running = con.execute(
         "select count(*) from orchestration_v2_projection_runs "
-        "where status not in ('completed', 'failed') and completed_at is null"
+        "where status not in ('completed', 'failed', 'cancelled', 'interrupted') "
+        "and completed_at is null and requested_at >= ?",
+        (cutoff,),
     ).fetchone()[0]
     con.close()
     return sorted(out), running
@@ -71,8 +83,13 @@ def gh(*args):
 
 
 def sync():
-    items, _ = waiting()
-    value = items[0][0].strftime("%Y-%m-%dT%H:%M:%SZ") if items else "none"
+    items, running = waiting()
+    if items:
+        value = items[0][0].strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif running:
+        value = "busy"  # agents working: wake the box again after any pause
+    else:
+        value = "none"
     try:
         last = open(STATE).read().strip()
     except OSError:
@@ -90,7 +107,92 @@ def sync():
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     with open(STATE, "w") as f:
         f.write(value)
-    print(f"WAKE_AT set to {value} ({len(items)} thread(s) waiting)")
+    print(f"WAKE_AT set to {value} ({len(items)} thread(s) waiting, {running} run(s) active)")
+
+
+def http_ok(url, timeout=5):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status < 500, r.read(2000)
+    except urllib.error.HTTPError as e:
+        return e.code < 500, b""
+    except Exception:
+        return False, b""
+
+
+def t3_port():
+    try:
+        return json.load(open(RUNTIME)).get("port") or 3773
+    except Exception:
+        return 3773
+
+
+def tunnel_ready():
+    """T3 Connect: cloudflared's /ready reports live connections to Cloudflare."""
+    pids = subprocess.run(["pgrep", "-f", "cloudflared tunnel"], capture_output=True, text=True).stdout.split()
+    if not pids:
+        return False, "cloudflared not running"
+    ss = subprocess.run(["ss", "-ltnpH"], capture_output=True, text=True).stdout
+    for line in ss.splitlines():
+        if any(f"pid={p}," in line for p in pids):
+            m = re.search(r"127\.0\.0\.1:(\d+)", line)
+            if m:
+                ok, body = http_ok(f"http://127.0.0.1:{m.group(1)}/ready")
+                try:
+                    n = json.loads(body or b"{}").get("readyConnections", 0)
+                except ValueError:
+                    n = 0
+                if ok and n > 0:
+                    return True, f"{n} connection(s)"
+                return False, f"0 ready connections"
+    return False, "metrics port not found"
+
+
+def wait_for(fn, seconds):
+    deadline = time.time() + seconds
+    while True:
+        ok, info = fn()
+        if ok or time.time() >= deadline:
+            return ok, info
+        time.sleep(5)
+
+
+def restart_t3():
+    print("restarting t3code.service")
+    subprocess.run(["systemctl", "--user", "restart", "t3code.service"], check=False)
+
+
+def ensure():
+    """Make sure T3 Code, T3 Connect and instabox's T3 server work after a wake."""
+    healthy = True
+    for attempt in (1, 2):
+        active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "t3code.service"]).returncode == 0
+        if not active:
+            print("t3code.service not active")
+            restart_t3()
+        server = lambda: (http_ok(f"http://127.0.0.1:{t3_port()}/")[0], "")
+        s_ok, _ = wait_for(server, 60)
+        t_ok, t_info = wait_for(tunnel_ready, 90) if s_ok else (False, "server down")
+        print(f"T3 Code server (:{t3_port()}): {'ok' if s_ok else 'DOWN'}")
+        print(f"T3 Connect tunnel: {'ok' if t_ok else 'DOWN'} ({t_info})")
+        if s_ok and t_ok:
+            break
+        if attempt == 1:
+            restart_t3()
+        else:
+            healthy = False
+    # instabox's own T3 launcher (port 3774); start it again if it is gone
+    if os.path.exists(INSTABOX_T3_START):
+        if not wait_for(lambda: (http_ok("http://127.0.0.1:3774/")[0], ""), 10)[0]:
+            print("instabox T3 server (:3774) down; starting it")
+            log = open(os.path.expanduser("~/.local/state/t3-wake/instabox-t3.log"), "a")
+            subprocess.Popen([INSTABOX_T3_START], stdout=log, stderr=log, start_new_session=True)
+            ok = wait_for(lambda: (http_ok("http://127.0.0.1:3774/")[0], ""), 60)[0]
+            print(f"instabox T3 server (:3774): {'ok' if ok else 'DOWN'}")
+            healthy = healthy and ok
+        else:
+            print("instabox T3 server (:3774): ok")
+    return healthy
 
 
 def check():
@@ -98,7 +200,8 @@ def check():
     overdue = [i for i in items if i[0] + GRACE <= now()]
     if overdue and running == 0:
         print(f"{len(overdue)} thread(s) still waiting past reset; restarting T3 Code")
-        subprocess.run(["systemctl", "--user", "restart", "t3code.service"], check=False)
+        restart_t3()
+        ensure()
     elif overdue:
         print(f"{len(overdue)} thread(s) overdue but {running} run(s) active; not restarting")
     else:
@@ -116,6 +219,8 @@ def status():
 
 
 if __name__ == "__main__":
-    {"sync": sync, "check": check, "status": status}.get(
-        sys.argv[1] if len(sys.argv) > 1 else "status", status
-    )()
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "ensure":
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        sys.exit(0 if ensure() else 1)
+    {"sync": sync, "check": check, "status": status}.get(cmd, status)()
