@@ -53,6 +53,7 @@ jobs:
       LEAD_MINUTES: "20"   # wake this long before the reset
       INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
       INSTABOX_NO_UPDATE_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - run: npm install -g instabox@0.8.289

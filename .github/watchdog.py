@@ -107,10 +107,12 @@ def lease(method):
         headers={"X-API-Key": os.environ["INSTABOX_API_KEY"], "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=60):
+        with urllib.request.urlopen(req, timeout=60) as r:
+            log(f"lease {method} ok (HTTP {r.status})" + (f", held {LEASE_TTL}s" if method == "PUT" else ""))
             return True
     except urllib.error.HTTPError as e:
         if method == "DELETE" and e.code == 404:
+            log("no lease to release")
             return True
         try:
             code = json.loads(e.read() or b"{}").get("error", {}).get("code", "")
