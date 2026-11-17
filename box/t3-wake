@@ -6,8 +6,9 @@ limit recovery on it (limitRecovery.autoResume, not snoozed) and no run has
 started on it since its resetAt.
 
   t3-wake status   print waiting threads and the earliest reset
-  t3-wake sync     publish the earliest reset as the GitHub variable WAKE_AT
-                   and enable the wake workflow (or set WAKE_AT=none)
+  t3-wake sync     publish the earliest reset (WAKE_AT, or none) and whether
+                   agents are working (T3_BUSY, 1 or 0) as GitHub variables,
+                   and start the watchdog workflow when either changes
   t3-wake ensure   after a wake: T3 Code server answering, T3 Connect tunnel
                    connected (restart T3 Code if not), instabox's T3 server up
   t3-wake check    run by the workflow after a reset: ensure, then send
@@ -70,11 +71,12 @@ def waiting():
                 break
         if not resumed:
             out.append((reset, tid, title or ""))
-    # runs still in progress (ignore anything older than 12 h, e.g. a lost run)
+    # runs in progress (ignore anything older than 12 h, e.g. a lost run).
+    # "queued" runs are waiting for a limit to reset, not working.
     cutoff = (now() - dt.timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%S")
     running = con.execute(
         "select count(*) from orchestration_v2_projection_runs "
-        "where status not in ('completed', 'failed', 'cancelled', 'interrupted') "
+        "where status not in ('completed', 'failed', 'cancelled', 'interrupted', 'queued') "
         "and completed_at is null and requested_at >= ?",
         (cutoff,),
     ).fetchone()[0]
@@ -88,30 +90,32 @@ def gh(*args):
 
 def sync():
     items, running = waiting()
-    if items:
-        value = items[0][0].strftime("%Y-%m-%dT%H:%M:%SZ")
-    elif running:
-        value = "busy"  # agents working: wake the box again after any pause
-    else:
-        value = "none"
+    wake_at = items[0][0].strftime("%Y-%m-%dT%H:%M:%SZ") if items else "none"
+    busy = "1" if running else "0"
+    value = f"{wake_at} {busy}"
     try:
         last = open(STATE).read().strip()
     except OSError:
         last = None
     if value == last:
-        print(f"WAKE_AT unchanged: {value}")
+        print(f"unchanged: WAKE_AT={wake_at} T3_BUSY={busy}")
         return
-    r = gh("variable", "set", "WAKE_AT", "-R", REPO, "-b", value)
+    for name, v in (("WAKE_AT", wake_at), ("T3_BUSY", busy)):
+        r = gh("variable", "set", name, "-R", REPO, "-b", v)
+        if r.returncode != 0:
+            sys.exit(f"gh variable set {name} failed: {r.stderr.strip()}")
+    # (Re)start the watchdog so it picks up the new values; a new run
+    # replaces the running one. It also clears the lease when idle.
+    r = gh("workflow", "enable", WORKFLOW, "-R", REPO)
+    if r.returncode != 0 and "already enabled" not in (r.stderr + r.stdout).lower():
+        print(f"warning: could not enable workflow: {r.stderr.strip()}")
+    r = gh("workflow", "run", WORKFLOW, "-R", REPO)
     if r.returncode != 0:
-        sys.exit(f"gh variable set failed: {r.stderr.strip()}")
-    if value != "none":
-        r = gh("workflow", "enable", WORKFLOW, "-R", REPO)
-        if r.returncode != 0 and "already enabled" not in (r.stderr + r.stdout).lower():
-            print(f"warning: could not enable workflow: {r.stderr.strip()}")
+        sys.exit(f"gh workflow run failed: {r.stderr.strip()}")
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     with open(STATE, "w") as f:
         f.write(value)
-    print(f"WAKE_AT set to {value} ({len(items)} thread(s) waiting, {running} run(s) active)")
+    print(f"WAKE_AT={wake_at} T3_BUSY={busy} ({len(items)} thread(s) waiting, {running} run(s) active); watchdog started")
 
 
 def http_ok(url, timeout=5):
