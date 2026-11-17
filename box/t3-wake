@@ -10,7 +10,7 @@ started on it since its resetAt.
                    agents are working (T3_BUSY, 1 or 0) as GitHub variables,
                    and start the watchdog workflow when either changes
   t3-wake ensure   after a wake: T3 Code server answering, T3 Connect tunnel
-                   connected (restart T3 Code if not), instabox's T3 server up
+                   connected (restart T3 Code if not)
   t3-wake check    run by the workflow after a reset: ensure, then send
                    "continue" (t3 thread send) to any thread T3 Code has not
                    resumed 5+ minutes after its reset; then sync
@@ -30,7 +30,6 @@ REPO = os.environ.get("T3_WAKE_REPO", "K-Khushal/instabox-waker")
 WORKFLOW = "wake.yml"
 DB = os.path.expanduser("~/.t3/userdata/statev2.sqlite")
 RUNTIME = os.path.expanduser("~/.t3/userdata/server-runtime.json")
-INSTABOX_T3_START = os.path.expanduser("~/.local/share/t3-instabox/start")
 STATE = os.path.expanduser("~/.local/state/t3-wake/last")
 GRACE = dt.timedelta(minutes=5)
 NUDGE = os.environ.get(
@@ -189,17 +188,8 @@ def ensure():
             restart_t3()
         else:
             healthy = False
-    # instabox's own T3 launcher (port 3774); start it again if it is gone
-    if os.path.exists(INSTABOX_T3_START):
-        if not wait_for(lambda: (http_ok("http://127.0.0.1:3774/")[0], ""), 10)[0]:
-            print("instabox T3 server (:3774) down; starting it")
-            log = open(os.path.expanduser("~/.local/state/t3-wake/instabox-t3.log"), "a")
-            subprocess.Popen([INSTABOX_T3_START], stdout=log, stderr=log, start_new_session=True)
-            ok = wait_for(lambda: (http_ok("http://127.0.0.1:3774/")[0], ""), 60)[0]
-            print(f"instabox T3 server (:3774): {'ok' if ok else 'DOWN'}")
-            healthy = healthy and ok
-        else:
-            print("instabox T3 server (:3774): ok")
+    # instabox's own T3 server (port 3774) is not used (T3 Connect uses
+    # t3code.service), so it is left stopped to save memory.
     return healthy
 
 

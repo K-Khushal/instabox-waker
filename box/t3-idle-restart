@@ -1,0 +1,35 @@
+#!/bin/sh
+# Restart T3 Code and empty swap once no agent has been working for 5 minutes,
+# so a long-running T3 server and swapped-out memory stop slowing the box.
+# Gives up after 6 hours. Start it detached:
+#   systemd-run --user --unit t3-idle-restart ~/.local/bin/t3-idle-restart
+set -u
+T3WAKE="$HOME/.local/bin/t3-wake"
+idle_for=0
+deadline=$(( $(date +%s) + 6*3600 ))
+busy() {
+  [ "$("$T3WAKE" status | sed -n 's/^runs active: //p')" != 0 ] && return 0
+  pgrep -u "$(id -u)" -f 'eslint|tsc|vitest|jest|pnpm|npm (run|test|ci|install)|cargo|go (build|test)' >/dev/null
+}
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if busy; then idle_for=0; else idle_for=$((idle_for + 1)); fi
+  if [ "$idle_for" -ge 5 ]; then
+    echo "idle 5 min; restarting t3code.service"
+    systemctl --user restart t3code.service
+    sleep 20
+    used=$(free -m | awk '/^Swap:/{print $3}')
+    avail=$(free -m | awk '/^Mem:/{print $7}')
+    if [ "$avail" -gt $((used + 1024)) ]; then
+      echo "emptying swap (${used} MB used, ${avail} MB available)"
+      sudo swapoff -a && sudo swapon -a
+    else
+      echo "not enough free memory to empty swap (${used} MB used, ${avail} MB available)"
+    fi
+    "$T3WAKE" ensure
+    free -m
+    exit 0
+  fi
+  sleep 60
+done
+echo "agents never idle for 5 min in 6 h; nothing restarted"
+exit 1

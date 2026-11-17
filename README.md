@@ -15,12 +15,16 @@ own auto-resume can carry on.
     model API is not idle-paused, and wakes the box after any pause it took by
     itself (after the cooldown, for a runtime-cap pause).
   - From `WAKE_AT - 20 min`: keeps the box awake and runs `t3-wake ensure`
-    (T3 Code server, T3 Connect tunnel, instabox's T3 server; restarts T3 Code
-    if needed). From 5 min after the reset, every 10 min, `t3-wake check`
+    (T3 Code server and T3 Connect tunnel; restarts T3 Code if needed).
+    instabox's own T3 server (port 3774) is left stopped to save memory.
+    From 5 min after the reset, every 10 min, `t3-wake check`
     sends "continue" to any thread T3 Code has not resumed.
   - A box paused by hand (`instabox suspend`) is left alone.
   The 15-minute schedule is only a backup that starts a watchdog if none runs
   (GitHub's cron is often hours late).
+- `box/t3-idle-restart`: one-off tidy-up. Waits until no agent has worked for
+  5 minutes, then restarts T3 Code (frees its memory) and empties swap.
+  Start it with `systemd-run --user --unit t3-idle-restart ~/.local/bin/t3-idle-restart`.
 - Manual test: Actions > wake box > Run workflow, tick "test".
 
 Needs the repo secret `INSTABOX_API_KEY`.
