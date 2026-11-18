@@ -1,7 +1,7 @@
 #!/bin/sh
 # Keep /data from filling up (a full disk breaks T3 Code's database).
 # When less than MIN_FREE_MB is free, clear only things that refill by
-# themselves: package-manager caches and T3's rotated (old) provider logs.
+# themselves: package-manager caches, the Node compile cache and T3's rotated (old) provider logs.
 # Never touches worktrees, projects, databases or Docker volumes. Each cache
 # is skipped while a matching install is running.
 set -u
@@ -25,6 +25,8 @@ if ! running '(^|/)pnpm (install|i|add|update|up|dlx)( |$)'; then
   rm -rf "$HOME"/.cache/pnpm/v*/metadata* "$HOME"/.cache/pnpm/metadata* && echo "  pnpm metadata cache cleared"
 fi
 rm -f "$HOME"/.t3/userdata/logs/provider/*.log.[0-9]* && echo "  old T3 provider logs removed"
+# Node rebuilds its compile cache on demand (it reached 750 MB here)
+rm -rf /data/tmp/node-compile-cache && echo "  Node compile cache cleared"
 journalctl --user --vacuum-size=50M >/dev/null 2>&1
 after=$(free_mb)
 echo "/data: ${after} MB free (was ${before} MB)"
