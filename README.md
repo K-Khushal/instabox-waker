@@ -25,6 +25,15 @@ own auto-resume can carry on.
 - `box/t3-idle-restart`: one-off tidy-up. Waits until no agent has worked for
   5 minutes, then restarts T3 Code (frees its memory) and empties swap.
   Start it with `systemd-run --user --unit t3-idle-restart ~/.local/bin/t3-idle-restart`.
+- `box/disk-guard` (+ `.service`, `.timer`, every 10 min): when `/data` has
+  under 2 GB free, clears the npm, uv and pnpm metadata caches and T3's
+  rotated provider logs. Never touches worktrees, projects, databases or
+  Docker volumes. Install: copy to `~/.local/bin` and `~/.config/systemd/user`,
+  then `systemctl --user enable --now disk-guard.timer`.
+- Extra swap (set up by hand on the box, not in this repo): a 4 GB
+  `/swapfile` on the root disk with priority 10 (in `/etc/fstab`), on top of
+  instabox's 4 GB `/data/swapfile`, so agents that run out of memory are
+  slowed down by swapping instead of being killed.
 - Manual test: Actions > wake box > Run workflow, tick "test".
 
 Needs the repo secret `INSTABOX_API_KEY`.

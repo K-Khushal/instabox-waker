@@ -1,0 +1,8 @@
+[Unit]
+Description=Clear package caches when /data runs low (instabox waker)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/disk-guard
+Nice=10
+IOSchedulingClass=idle

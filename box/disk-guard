@@ -1,0 +1,33 @@
+#!/bin/sh
+# Keep /data from filling up (a full disk breaks T3 Code's database).
+# When less than MIN_FREE_MB is free, clear only things that refill by
+# themselves: package-manager caches and T3's rotated (old) provider logs.
+# Never touches worktrees, projects, databases or Docker volumes. Each cache
+# is skipped while a matching install is running.
+set -u
+MIN_FREE_MB=${MIN_FREE_MB:-2048}
+free_mb() { df -Pm /data | awk 'NR==2{print $4}'; }
+running() { pgrep -u "$(id -u)" -f "$1" >/dev/null; }
+
+before=$(free_mb)
+if [ "$before" -ge "$MIN_FREE_MB" ]; then
+  echo "/data: ${before} MB free; nothing to do"
+  exit 0
+fi
+echo "/data: only ${before} MB free; clearing caches"
+if ! running '(^|/)npm (install|i|ci|update)( |$)'; then
+  npm cache clean --force >/dev/null 2>&1 && echo "  npm cache cleared"
+fi
+if command -v uv >/dev/null && ! running '(^|/)uv (pip|sync|add|lock|run|tool)( |$)'; then
+  uv cache clean >/dev/null 2>&1 && echo "  uv cache cleared"
+fi
+if ! running '(^|/)pnpm (install|i|add|update|up|dlx)( |$)'; then
+  rm -rf "$HOME"/.cache/pnpm/v*/metadata* "$HOME"/.cache/pnpm/metadata* && echo "  pnpm metadata cache cleared"
+fi
+rm -f "$HOME"/.t3/userdata/logs/provider/*.log.[0-9]* && echo "  old T3 provider logs removed"
+journalctl --user --vacuum-size=50M >/dev/null 2>&1
+after=$(free_mb)
+echo "/data: ${after} MB free (was ${before} MB)"
+if [ "$after" -lt 1024 ]; then
+  echo "WARNING: /data still has under 1 GB free; old worktrees or Docker volumes need a look"
+fi
